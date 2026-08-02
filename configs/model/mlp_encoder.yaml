@@ -1,0 +1,10 @@
+# Baseline MLP board state encoder.
+#
+# Consumed by: src/models/state_mlp.py
+# Architecture: Linear(912 -> 512) -> ReLU -> Linear(512 -> 256)
+
+type: mlp
+
+raw_dim:               # 912, concatenated raw board vector
+hidden_dim:            # 512
+state_embed_dim:       # 256, must match the joint scorer's expectation

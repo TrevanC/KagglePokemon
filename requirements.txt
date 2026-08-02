@@ -1,0 +1,12 @@
+# Core training + inference stack.
+torch>=2.0
+numpy>=1.24
+
+# Config loading (configs/*.yaml).
+PyYAML>=6.0
+
+# Experiment tracking for training runs.
+wandb>=0.16
+
+# Progress bars for replay generation / dataset processing.
+tqdm>=4.66

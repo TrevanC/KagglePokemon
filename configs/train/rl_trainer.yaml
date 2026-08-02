@@ -1,0 +1,36 @@
+# Reinforcement learning / PPO self-play settings.
+#
+# Consumed by: src/training/trainer_rl.py
+# Typically warm-started from a behavioral cloning checkpoint.
+
+experiment_name:       # e.g. "ppo_selfplay_v1"
+seed:                  # 42
+device:
+
+init_from:             # BC checkpoint to warm-start from, e.g. "models/registry/best_policy.pt"
+
+rollout:
+  num_envs:            # parallel self-play matches
+  steps_per_update:    # decisions collected before each policy update
+  opponent_pool:       # baselines / frozen past checkpoints to sample opponents from
+  replay_dir:          # "data/replays/self_play_v1/"
+
+ppo:
+  gamma:               # discount factor
+  gae_lambda:
+  clip_range:
+  value_coef:
+  entropy_coef:
+  num_epochs:          # optimization passes per batch of rollouts
+  minibatch_size:
+
+optimizer:
+  lr:
+  weight_decay:
+  grad_clip:
+  total_updates:
+
+checkpoint:
+  save_dir:            # "models/checkpoints/"
+  registry_dir:        # "models/registry/"
+  promote_on_winrate:  # arena win rate required to promote to the registry

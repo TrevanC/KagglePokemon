@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ptcg-ai"
+version = "0.1.0"
+description = "Pokemon TCG AI Battle - dynamic action-scoring policy network and training pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "wandb>=0.16",
+    "tqdm>=4.66",
+]
+
+[tool.setuptools.packages.find]
+include = ["src*"]

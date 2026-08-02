@@ -1,0 +1,37 @@
+# Card pool & feature/lookup-table dimensions.
+#
+# Consumed by: src/card_db/static_table.py, src/env/state_extractor.py
+# Reference: docs/Technical Specification.md §2
+
+cards:
+  num_cards:           # 1267 unique card IDs in EN_Card_Data.csv
+  csv_path:            # "data/raw/EN_Card_Data.csv"
+  static_table_path:   # "data/processed/static_feature_table.pt"
+
+# Per-card feature widths. static + id_embed + dynamic = card_in_dim -> card_out_dim
+card_vector:
+  static_dim:          # 32, precomputed lookup row
+  id_embed_dim:        # 8, nn.Embedding(num_cards, ...)
+  dynamic_dim:         # 8: hp ratio, energy ratio, 6 status flags
+  card_out_dim:        # 64, after Linear + ReLU
+
+# Board state composition -> raw_state_dim
+board:
+  num_field_slots:     # 12: self active + 5 bench, opp active + 5 bench
+  hand_pool_dim:       # 64, mean-pooled over hand cards
+  discard_proj_dim:    # 64, Linear(num_cards -> ...) over the discard histogram
+  global_scalar_dim:   # 16: prizes, deck counts, turn flags, padded
+  raw_state_dim:       # 912 = 12*64 + 64 + 64 + 16
+
+# Candidate action matrix (k, action_in_dim)
+actions:
+  action_in_dim:       # 16: 10 option-type one-hot + card id + slot idx + 4 padding
+  max_candidates:      # k upper bound, ~50
+
+# Normalization divisors used when building features.
+normalization:
+  max_hp:              # 340.0
+  max_damage:          # 300.0
+  max_retreat_cost:    # 4.0
+  deck_size:           # 60.0
+  prize_count:         # 6.0

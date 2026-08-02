@@ -1,0 +1,19 @@
+# Transformer board state encoder (drop-in replacement for the MLP).
+#
+# Consumed by: src/models/state_transformer.py
+# Sequence: [CLS] + 12 field slots + N hand cards + scalars, each tagged with a
+# zone embedding; the updated [CLS] token is projected to the state embedding.
+
+type: transformer
+
+d_model:               # 128, token dimension
+nhead:                 # 4 heads (d_head = 32)
+num_layers:            # 2 encoder layers
+dim_feedforward:       # 256 (2 * d_model)
+activation:            # "relu"
+batch_first:           # true
+
+# Zone IDs: 0=[CLS], 1=self active, 2..6=self bench, 7=opp active,
+#           8..12=opp bench, 13=hand, 14=discard, 15=scalars
+num_zones:             # 16
+state_embed_dim:       # 256, output of Linear(128 -> 256) -> ReLU -> Linear(256 -> 256)

@@ -1,0 +1,37 @@
+# Behavioral cloning training hyperparameters.
+#
+# Consumed by: scripts/train_bc.py -> src/training/trainer_bc.py
+# Loss: cross-entropy over the k candidate options at each decision point.
+
+experiment_name:       # e.g. "bc_transformer_baseline_v1"
+seed:                  # 42
+device:                # "cuda" for training; inference is CPU-only
+
+data:
+  train_path:          # "data/datasets/train_bc_v1.pt"
+  val_path:            # "data/datasets/val_bc_v1.pt"
+  batch_size:          # 64
+  num_workers:         # 2
+
+model:
+  type:                # "mlp" | "transformer"
+  num_cards:           # 1267
+  state_embed_dim:     # 256
+  action_in_dim:       # 16
+  action_embed_dim:    # 64
+  num_transformer_layers:  # 2, transformer only
+  num_heads:           # 4, transformer only
+
+optimizer:
+  lr:                  # 0.0003
+  weight_decay:        # 0.0001
+  epochs:              # 25
+  grad_clip:           # 1.0
+
+checkpoint:
+  save_dir:            # "models/checkpoints/"
+  registry_dir:        # "models/registry/"
+
+logging:
+  wandb_project:       # "ptcg-ai-challenge"
+  log_every_n_steps:   # 10

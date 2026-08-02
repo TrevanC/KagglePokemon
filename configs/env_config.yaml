@@ -1,0 +1,17 @@
+# Kaggle environment & cabt engine settings.
+#
+# Consumed by: src/env/cabt_wrapper.py, scripts/generate_replays.py
+
+# Path to the vendored arena harness (runner.py, agents.py, cg/ bindings).
+arena_path:            # e.g. "pokemon-tcg-ai-battle/arena"
+
+# Default 60-card deck list used when a match doesn't specify one.
+default_deck:          # e.g. "pokemon-tcg-ai-battle/arena/agents/lucario/deck.csv"
+
+match:
+  max_turns:           # safety cap so a stuck match can't run forever
+  swap_sides:          # alternate who plays first, to cancel position bias
+  verbose:             # step-by-step logging during a match
+
+# Illegal moves forfeit the game, mirroring Kaggle. Note the engine's RNG is
+# not seedable — run many games for stable win rates.
