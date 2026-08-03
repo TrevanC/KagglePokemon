@@ -93,7 +93,12 @@ def is_legal(action, select) -> bool:
 
 
 def iter_decisions(replay: dict, offset: int = 1) -> Iterator[tuple[int, dict, list]]:
-    """Yield (player_index, select_dict, action) for each decision in a replay.
+    """Yield (player_index, observation, action) for each decision in a replay.
+
+    Yields the WHOLE observation, not just `select`. The board state lives in
+    obs["current"], and the 984-dim board vector (spec §4) cannot be built
+    without it -- storing only the option list would produce records that look
+    fine and are useless for training.
 
     `offset` is the step lag between an observation and its action; it is 1 for
     Kaggle replays and is exposed only so validate_alignment() can compare.
@@ -104,13 +109,12 @@ def iter_decisions(replay: dict, offset: int = 1) -> Iterator[tuple[int, dict, l
             if slot.get("status") != "ACTIVE":
                 continue
             obs = slot.get("observation") or {}
-            select = obs.get("select")
-            if not select:
+            if not obs.get("select"):
                 continue
             j = i + offset
             if j >= len(steps):
                 continue
-            yield p, select, steps[j][p].get("action")
+            yield p, obs, steps[j][p].get("action")
 
 
 def validate_alignment(replay: dict) -> dict:
@@ -123,8 +127,8 @@ def validate_alignment(replay: dict) -> dict:
     out = {}
     for offset in (0, 1):
         legal = illegal = 0
-        for _p, select, action in iter_decisions(replay, offset):
-            if is_legal(action, select):
+        for _p, obs, action in iter_decisions(replay, offset):
+            if is_legal(action, obs["select"]):
                 legal += 1
             else:
                 illegal += 1
@@ -173,7 +177,8 @@ def replay_to_records(
     teams = replay["info"].get("TeamNames") or []
     main_ctx = _main_context() if main_only else None
 
-    for player, select, action in iter_decisions(replay, offset=1):
+    for player, obs, action in iter_decisions(replay, offset=1):
+        select = obs["select"]
         if winners_only and (winner is None or player != winner):
             continue
         if main_only and select["context"] != main_ctx:
@@ -182,7 +187,11 @@ def replay_to_records(
             continue          # forfeited/malformed row; global check above guards the schema
         reward = rewards[player] if player < len(rewards) else None
         yield {
-            "obs": {"select": select},
+            # The FULL observation: obs["current"] carries the board state the
+            # 984-dim feature vector is built from. Dropping it yields records
+            # that look valid and cannot train anything.
+            "obs": {"select": select, "current": obs.get("current"),
+                    "logs": obs.get("logs")},
             "action": action,
             "player": player,
             "reward": 0 if reward is None else reward,
