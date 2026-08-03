@@ -146,10 +146,23 @@ kaggle competitions logs <episode_id> <agent_idx>  # agent stderr/stdout for deb
 `competitions.EpisodeService/*` HTTP endpoints reject both anonymous and OAuth-bearer requests;
 don't go down that path.
 
-**Discovery requires your own submission.** `episodes` takes a *submission* ID and returns nothing
-for other people's teams, so episode IDs are only enumerable once you have a submission on the
-leaderboard. The global index otherwise lives in Meta Kaggle (`Episodes.csv`, 6.3 GB;
-`EpisodeAgents.csv`, 21.8 GB) via `kaggle datasets download -f Episodes.csv kaggle/meta-kaggle`.
+**`episodes` takes a SUBMISSION id — and works for other people's submissions.** This is the whole
+unlock, and it is easy to miss: a *team* id returns "No episodes found", which makes it look like
+the command only works on your own account. Submission ids are exposed in leaderboard URLs when you
+click a team on the competition leaderboard page:
+
+```
+https://www.kaggle.com/competitions/pokemon-tcg-ai-battle/leaderboard?submissionId=55186239&episodeId=89625016
+                                                                                  ^^^^^^^^
+```
+
+So no submission of your own is needed to harvest expert data. `scripts/fetch_kaggle_replays.py`
+wraps this: give it submission ids, it enumerates episodes and downloads replays with rate
+limiting and resume. One top-ranked submission yielded **178 episodes**, ~145 decisions each
+(~3-5 MB per replay, so ~700 MB per submission — `data/replays/` is gitignored).
+
+Meta Kaggle (`Episodes.csv` 6.3 GB, `EpisodeAgents.csv` 21.8 GB) remains the alternative global
+index, but is not needed for this workflow.
 
 **Each replay contains BOTH players' decisions**, and `replay["rewards"]` identifies the winner
 (`[-1, 1]` → player 1 won). Measured on episode 89083821: 120 decisions total, ~60 MAIN, split
