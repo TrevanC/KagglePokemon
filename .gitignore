@@ -11,10 +11,12 @@ venv/
 # Claude Code machine-local settings
 .claude/settings.local.json
 
-# Competition card-ID reference PDFs — 174 MB and 131 MB, well over GitHub's
-# 100 MB per-file hard limit. Re-download them with the Kaggle bundle if
-# needed; EN_Card_Data.csv carries the same data in a usable form.
-pokemon-tcg-ai-battle/*.pdf
+# Competition card-ID reference PDFs (data/raw/Card_ID List_*.pdf) — 174 MB
+# and 131 MB, well over GitHub's 100 MB per-file hard limit. Already covered
+# by the data/** rule below; listed explicitly so the reason is on record.
+# Re-download them with the Kaggle bundle if needed — the card CSVs carry the
+# same data in a usable form.
+data/raw/*.pdf
 
 # Experiment tracking
 wandb/
@@ -34,7 +36,8 @@ submission/build/**
 submission/*.tar.gz
 *.pt
 
-# ...so that these survive: the static card database (the tracked pipeline
-# input) and the .gitkeep markers that preserve the empty directories.
+# ...so that these survive: the static card databases (the tracked pipeline
+# inputs) and the .gitkeep markers that preserve the empty directories.
 !data/raw/EN_Card_Data.csv
+!data/raw/JP_Card_Data.csv
 !**/.gitkeep

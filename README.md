@@ -12,14 +12,19 @@ Target environment: 2 vCPUs, 12.2 GiB RAM, **CPU-only** evaluation, **< 10 ms** 
 | Path | What lives there |
 |------|------------------|
 | `configs/` | Experiment and hyperparameter YAML (env, features, model, training) |
-| `data/` | Card CSV, precomputed feature table, raw replays, tensor datasets (git-ignored except `data/raw/EN_Card_Data.csv`) |
+| `data/` | `raw/` card databases (EN/JP CSVs + card-ID reference PDFs), precomputed feature table, raw replays, tensor datasets |
 | `models/` | `checkpoints/` from training runs; `registry/` for validated weights |
 | `notebooks/` | Research and feature-analysis notebooks |
 | `src/` | Core module: `card_db`, `env`, `models`, `dataset`, `training`, `evaluation` |
 | `scripts/` | Pipeline entrypoints (steps 1–6 below) |
 | `submission/` | Kaggle deployment sandbox — `build/` staging area and the final tarball |
 | `docs/` | Architecture blueprint and technical specification |
-| `pokemon-tcg-ai-battle/` | Vendored Kaggle bundle: native `cg` engine, card data, sample submission, and a working local arena |
+| `pokemon-tcg-ai-battle/` | Vendored Kaggle bundle: native `cg` engine, sample submission, and a working local arena |
+
+Everything under `data/` and `models/` is git-ignored except the card CSVs in
+`data/raw/`, which are the tracked pipeline inputs. The two `Card_ID List_*.pdf`
+references are ignored too — at 174 MB and 131 MB they exceed GitHub's 100 MB
+per-file limit, and the CSVs carry the same data in a usable form.
 
 ## Pipeline
 
