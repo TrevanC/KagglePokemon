@@ -7,8 +7,12 @@ Input:   data/replays/**/*.jsonl.gz  plus
 Output:  data/datasets/train_bc_v1.pt, data/datasets/val_bc_v1.pt
 Config:  configs/feature_config.yaml
 
-Each output holds states (N, 912), actions (N, k, 16), targets (N,), and
-masks (N, k) — see src/dataset/dataset.py.
+Each output holds states (N, 984), actions (N, k, 192), targets (N,), and
+masks (N, k) with k padded to K_MAX = 80 — see src/dataset/dataset.py.
+
+Keep only SelectContext.MAIN decisions (spec §1); the other 48 contexts are
+served by the heuristic fallback, not learned. Drop decisions with k > K_MAX
+rather than truncating their candidate lists.
 
 Featurization goes through src/env/state_extractor.py, the *same* code live
 inference uses (technical specification §2.5). Reimplementing it here would

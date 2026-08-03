@@ -13,7 +13,7 @@ Bundle layout:
     ├── main.py                 entrypoint: agent(obs, config), lazily
     │                           constructing a module-level agent singleton
     ├── best_model.pt           trained weights (~3 MB)
-    ├── static_table.pt         precomputed (1267, 32) lookup tensor
+    ├── static_table.pt         precomputed (1268, 72) lookup tensor
     ├── standalone_agent.py     inlined inference code, no external imports
     └── deck.csv                the 60-card deck the agent plays
 

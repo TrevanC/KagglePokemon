@@ -2,15 +2,18 @@
 
     python scripts/build_static_features.py
 
-Input:   data/raw/EN_Card_Data.csv          (1267 unique card IDs)
-Output:  data/processed/static_feature_table.pt   tensor of shape (1267, 32)
+Input:   the engine's card DB — cg.api.all_card_data() (1267 cards) and
+         all_attack() (1556 attacks), NOT the CSV (spec §2)
+Output:  data/processed/static_feature_table.pt   tensor of shape (1268, 72)
 Config:  configs/feature_config.yaml
 
-Runs once, offline. Design rule 2: the agent must never parse the CSV during a
-live turn — it reads this tensor instead.
+Row index IS the card ID; row 0 is zeroed so IDs 1..1267 index directly.
 
-Uses src/card_db/parser.py to read the CSV and src/card_db/static_table.py to
-build and save the tensor. See the feature index map in static_table.py.
+Runs once, offline. Design rule 2: the agent must never build this table during
+a live turn — it loads the tensor instead.
+
+Uses src/card_db/static_table.py; see the feature index map there. The CSV
+reader in src/card_db/parser.py is reference-only and not on this path.
 """
 
 if __name__ == "__main__":

@@ -79,18 +79,26 @@ lives in `pokemon-tcg-ai-battle/arena/cg/api.py`; convert with `to_observation_c
 
 ### The model: dynamic action scoring
 
-The network ranks the *k* legal options the engine offers this turn, rather than emitting a fixed
-action space (`docs/Technical Specification.md`):
+The network ranks the *k* legal options the engine offers, rather than emitting a fixed action
+space (`docs/Technical Specification.md`, revised against the live engine):
 
 ```
-obs -> board state (1, 912) -> state encoder -> s (1, 256) -.
-                                                             |-- expand to (k,256), concat
-obs -> action matrix (k, 16) -> action encoder -> (k, 64) --'   -> (k,320) -> MLP -> logits (k,)
-                                                                             -> softmax over k
+obs -> board state (B, 984) -> state encoder -> s (B, 256) -.
+                                                             |- expand to (B,k,256), concat
+obs -> action matrix (B,k,192) -> action encoder -> (k,64) -'  -> (k,320) -> MLP -> logits (k,)
+                                                                            -> mask -> softmax
 ```
 
-`912 = 12 field slots x 64 + hand 64 + discard 64 + scalars 16`. Training is cross-entropy over the
+`984 = 12 slots x 64 + hand 64 + self discard 64 + opp discard 64 + scalars 24`. Each action row is
+three 64-dim blocks: structural option fields, the **source card** resolved from `(area, index)`,
+and the **target slot** gathered via `(inPlayArea, inPlayIndex)`. Training is cross-entropy over the
 *k* candidates against the index the expert chose.
+
+**The action encoding is load-bearing.** The engine never populates `cardId` on MAIN options — it
+identifies targets positionally. An earlier design encoding only `(type, cardId, slot)` made 50.2%
+of options byte-identical to a sibling, which is unlearnable rather than merely inaccurate. Spec
+§5.4 makes zero encoding collisions a testable invariant; treat it as a permanent regression test,
+since broken features and an undertrained model look identical on a loss curve.
 
 Three invariants that span multiple files:
 
@@ -137,10 +145,23 @@ against each other locally.
 about 87% of the time. `greedy` develops the board (evolve → abilities → play → attach energy) and
 only then attacks. Strength order: `lucario > iono > greedy > first > random`.
 
-**`EN_Card_Data.csv` is not one row per card.** 2,022 rows cover 1,267 unique card IDs — a card gets
-one row per attack (723 IDs have 2-3 rows). Group by `Card ID` when parsing. Card IDs are 1-based
-(1..1267); pick one indexing convention for the `(1267, 32)` table and make `state_extractor.py`
-match it.
+**Card data comes from the engine, not the CSV.** `all_card_data()` and `all_attack()` return typed
+records; the static table is `(1268, 72)` indexed directly by card ID, with row 0 zeroed so 1-based
+IDs need no off-by-one convention. `data/raw/EN_Card_Data.csv` is a human-readable reference only —
+and note it is *not* one row per card: 2,022 rows for 1,267 IDs, one row per attack.
+
+**The engine asks 49 kinds of question, and the model answers one.** `SelectContext.MAIN` is 50.6%
+of decisions; the other 48 contexts route to the heuristic fallback in `src/evaluation/heuristics.py`,
+which therefore plays half the game and caps the agent's ceiling. That fallback must be *complete* —
+only 15 contexts appear in lucario-vs-iono play, and an unhandled one produces an illegal selection,
+which forfeits. MAIN is always `minCount == maxCount == 1`, so multi-select (`maxCount > 1` in 4.9%
+of decisions, `minCount == 0` in 8%) is entirely the fallback's problem.
+
+**Never trust a dimension from the original spec draft.** Nearly all were wrong: 17 option types not
+10, 12 energy types not 10, 7 card types not 3, 5 status flags not 6 (no Frozen, and they sit on
+`PlayerState` so they apply to the Active only), max HP 380 not 340, max damage 350 not 300, k up to
+67 not 50. Spec §0 tabulates the corrections and §9 says how to re-derive them after an engine
+update.
 
 **Native engine libraries are platform-specific.** `cg/` ships `libcg.dylib` (arm64 macOS),
 `libcg.so`, `libcg-arm64.so`, and `cg.dll`. Anything cross-platform must account for this.

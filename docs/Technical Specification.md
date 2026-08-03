@@ -1,297 +1,349 @@
 # **Technical Specification: Pokémon TCG AI Battle Model Architecture & Feature Pipeline**
 
-**Document Status:** Ready for Engineering Implementation  
-**Target Environment:** Kaggle Pokémon TCG AI Battle Challenge (2 vCPUs, 12.2 GiB RAM, CPU-only evaluation)  
-**Card Pool Size (**$N\_{\\text{cards}}$**):** 1,267 unique card IDs  
-**Inference Latency Budget:** $\< 10 \\text{ ms}$ per turn
+**Document Status:** Revised against the live engine — ready for implementation
+**Target Environment:** Kaggle Pokémon TCG AI Battle Challenge (2 vCPUs, 12.2 GiB RAM, CPU-only evaluation)
+**Card Pool Size (`N_cards`):** 1,267 unique card IDs (1..1267)
+**Inference Latency Budget:** < 10 ms per turn
 
-## **1\. System Architecture Overview**
+---
 
-This specification details a **Dynamic Action-Scoring Policy Network** designed to rank $k$ legal candidate turn options provided by the game engine. The architecture features a **Modular Board State Encoder** interface, allowing a baseline **MLP State Encoder** to be swapped seamlessly with an attention-based **Transformer State Encoder** without altering downstream action scoring or submission code.  
- \[ Observation Parsing Pipeline \]  
-                │  
-                ├──► State Feature Dict ──► \[ Board State Encoder (MLP / Transformer) \]  
-                │                                           │  
-                │                                    State Embedding s (1, 256\)  
-                │                                           │  
-                │                                           ▼  
-                │                                  \[ Virtual Expansion \] ──┐  
-                │                                   .expand(k, \-1)         │  
-                │                                           │              │  
-                └──► Action Matrix A (k, 16\) ──► \[ Action Encoder MLP \]    │  
-                                                            │              │  
-                                                  Action Embeddings (k, 64)│  
-                                                            │              │  
-                                                            ▼              ▼  
-                                                 \[ Joint Scorer MLP (320 → 1\) \]  
-                                                            │  
-                                                            ▼  
-                                                 \[ Softmax across k choices \]
+## **0. Revision note: what changed and why**
 
-## **2\. Feature Extraction & Parsing Specification**
+The original draft of this document was written from the competition write-up rather than
+from the engine. Every dimension below was re-derived by querying `cg.api` directly and by
+instrumenting real lucario-vs-iono matches (30–40 games, ~5,700 decisions per run). The
+reproduction scripts are described in §9.
 
-### **2.1 Offline/Precomputed Lookup (StaticCardFeatureTable)**
-
-To minimize per-turn CPU latency, card database properties are precomputed into a static lookup matrix $\\mathbf{M}\_{\\text{static}} \\in \\mathbb{R}^{1267 \\times 32}$ during agent initialization.
-
-> * **Source File:** EN\_Card\_Data.csv  
-> * **Output Tensor:** self.static\_table of shape (1267, 32\)
-
-| Feature Index Range | Feature Description | Encoding / Normalization |
+| Original claim | Measured reality | Consequence |
 | :---- | :---- | :---- |
-| 0 .. 2 | Category One-Hot | \[Is\_Pokemon, Is\_Trainer, Is\_Energy\] |
-| 3 .. 5 | Stage One-Hot | \[Is\_Basic, Is\_Stage1, Is\_Stage2\] |
-| 6 | Base HP | $\\frac{\\text{Base HP}}{340.0} \\in \[0.0, 1.0\]$ |
-| 7 .. 16 | Element Type One-Hot | 10 Pokémon Types (Grass, Fire, Water, etc.) |
-| 17 | Primary Attack Base Damage | $\\frac{\\text{Damage}}{300.0} \\in \[0.0, 1.0\]$ |
-| 18 | Retreat Cost | $\\frac{\\text{Retreat Cost}}{4.0} \\in \[0.0, 1.0\]$ |
-| 19 .. 31 | Reserved / Secondary Flags | Energy costs, trainer effect flags (padded with zeros) |
+| 10 option types | **17** (`OptionType`) | action one-hot widened |
+| 10 element types | **12** (`EnergyType`), incl. `RAINBOW`, `TEAM_ROCKET` | energy one-hots widened |
+| 3 card categories | **7** (`CardType`) | category one-hot widened |
+| 6 status flags incl. *Frozen* | **5**, no Frozen; stored on `PlayerState`, so they apply to the **Active only** | status block is 5-wide and only meaningful for the active slot |
+| Base HP ÷ 340 | max HP is **380** | normalizer corrected |
+| Damage ÷ 300 | max attack damage is **350** | normalizer corrected |
+| Parse `EN_Card_Data.csv` | `all_card_data()` / `all_attack()` return typed records | **no CSV parsing at all** (§2) |
+| Action target identified by `card_id` | `cardId` is **never populated** on MAIN options | the entire action encoding was rebuilt (§5) |
+| k ∈ [1, 50] | k reaches **67** | K_MAX raised; truncation forbidden |
+| One decision type | **49** `SelectContext` values; MAIN is **50.6%** of decisions | scope narrowed explicitly (§1) |
 
-### **2.2 Instance-Level Card Vector Construction**
+**The critical defect.** Under the original action encoding — `[type one-hot(10) | cardId/1267 |
+slot/12 | 4 pads]` — **60.5% of MAIN decisions contained two or more options that encode to
+byte-identical vectors**, covering **50.2% of all options**. The cause is that the engine
+identifies option targets *positionally* (`area`/`index` into a zone, plus
+`inPlayArea`/`inPlayIndex` for the target in play), and never by card ID. A representative
+collision:
 
-For any specific card instance on the field or in hand, static properties are combined with learned embeddings and live game state:  
-> $$\\mathbf{e}\_{\\text{card}} \= \[\\underbrace{\\mathbf{f}\_{\\text{static}}}\_{\\mathbb{R}^{32}} \\,;\\, \\underbrace{\\mathbf{e}\_{\\text{id}}}\_{\\mathbb{R}^{8}} \\,;\\, \\underbrace{\\mathbf{f}\_{\\text{dynamic}}}\_{\\mathbb{R}^{8}}\] \\in \\mathbb{R}^{48} \\xrightarrow{\\text{Linear}(48 \\to 64\) \+ \\text{ReLU}} \\mathbb{R}^{64}$$
+```
+{type: ATTACH, area: HAND, index: 0, inPlayArea: ACTIVE, inPlayIndex: 0}
+{type: ATTACH, area: HAND, index: 0, inPlayArea: BENCH,  inPlayIndex: 0}
+```
 
-> * **Static Vector (**$\\mathbf{f}\_{\\text{static}} \\in \\mathbb{R}^{32}$**):** Looked up via StaticCardFeatureTable\[card\_id\].  
-> * **Learned ID Vector (**$\\mathbf{e}\_{\\text{id}} \\in \\mathbb{R}^{8}$**):** Retrieved from nn.Embedding(1267, 8).  
-> * **Dynamic Vector (**$\\mathbf{f}\_{\\text{dynamic}} \\in \\mathbb{R}^{8}$**):**  
-  1. Current HP Ratio: $\\frac{\\text{current\\\_hp}}{\\text{max\\\_hp}} \\in \[0.0, 1.0\]$ (0.0 if not on field).  
-  2. Attached Energy Ratio: $\\min\\left(1.0, \\frac{\\text{attached\\\_energy}}{10.0}\\right)$.  
-  3. Status Condition Flags (6-dim multi-hot): \[Poisoned, Burned, Asleep, Paralyzed, Confused, Frozen\].
+— attach this energy to the Active attacker, versus to a benched Pokémon. Two strategically
+opposite moves, one vector.
 
-### **2.3 Online Board State Extraction (obs.current)**
+This is not a tuning problem. In behavioral cloning the target is an index into the k rows;
+when rows *i* and *j* are identical the network is asked to emit different logits for identical
+inputs, so the loss floors at `log(#duplicates)` and no amount of data, depth, or training
+resolves it. §5 replaces the encoding.
 
-The live board observation is mapped into 4 distinct feature groups:
+---
 
-> 1. **Fixed Field Slots (12 Slots):**  
-   * Positions: \[Self Active, Self Bench 1..5, Opp Active, Opp Bench 1..5\].  
-   * Unoccupied bench slots are filled with a zero vector of shape (1, 64).  
-   * Concatenated shape: (1, 12 \* 64\) \= (1, 768).  
-> 2. **Self Hand Cards (Variable Set):**  
-   * Mean-pooled embedding across all $N\_{\\text{hand}}$ card vectors in hand.  
-   * If hand is empty ($N\_{\\text{hand}} \= 0$), returns a zero vector of shape (1, 64).  
-   * Output shape: (1, 64).  
-> 3. **Discard Pile Summaries (Self & Opponent):**  
-   * Count frequency histogram vector $\\mathbf{v}\_{\\text{hist}} \\in \\mathbb{R}^{1267}$ normalized by $60.0$.  
-   * Projected through Linear(1267 \-\> 64\) $\\to$ (1, 64).  
-> 4. **Global Game Scalars (16 Dimensions):**  
-   * \[self\_prizes/6.0, opp\_prizes/6.0, self\_deck/60.0, opp\_deck/60.0, opp\_hand\_count/20.0, energy\_attached\_this\_turn\_flag, supporter\_played\_this\_turn\_flag, turn\_number/100.0, ... (padded to 16)\].
+## **1. Scope: which decisions the model makes**
 
-$$\\text{Raw Board Vector Dimension} \= 768 \+ 64 \+ 64 \+ 16 \= \\mathbf{912} \\text{ dimensions}$$
+The engine asks for 49 different kinds of selection, not one. Measured frequency over
+5,701 decisions:
 
-### **2.4 Action Candidate Extraction (obs.select.option)**
+| SelectContext | Share | k range | needs multi-select |
+| :---- | ----: | :---- | ----: |
+| `MAIN` | 50.6% | 1..67 | 0% |
+| `ATTACH_FROM` | 12.4% | 2..6 | 0% |
+| `TO_HAND` | 11.7% | 1..21 | 26% |
+| `ATTACH_TO` | 11.1% | 1..10 | 7% |
+| `DISCARD` | 3.5% | 1..8 | 16% |
+| `TO_ACTIVE`, `DISCARD_ENERGY_CARD`, `SWITCH`, `SETUP_*`, `TO_BENCH`, `IS_FIRST`, `ACTIVATE`, `DRAW_COUNT`, … | 10.7% | — | varies |
 
-For the turn's $k$ legal candidate actions ($k \\in \[1, 50\]$):
+**This specification covers `SelectContext.MAIN` only.** All other contexts are served by a
+rule-based fallback (`src/evaluation/heuristics.py`). Two consequences follow, and both are
+load-bearing:
 
-> * **Action Feature Vector (**$\\mathbf{a}\_{\\text{raw}, i} \\in \\mathbb{R}^{16}$**):**  
-  1. Option Enum Type One-Hot ($10$ dims: PLAY, ATTACH, EVOLVE, ABILITY, DISCARD, RETREAT, ATTACK, END, etc.).  
-  2. Target Normalized Card ID ($\\frac{\\text{card\\\_id}}{1267.0}$).  
-  3. Target Slot Index ($\\frac{\\text{slot\\\_idx}}{12.0}$).  
-  4. Padded parameter channels ($4$ dims).  
-> * Output Action Matrix shape: (k, 16).
+1. **The fallback plays roughly half the game.** It is not an edge case. The agent's ceiling is
+   bounded by the quality of that hand-written half.
+2. **The fallback must be complete, not merely good.** Only 15 of the 49 contexts appear in
+   lucario-vs-iono play; the other 34 depend on cards outside those decks. An unhandled context
+   produces an illegal selection, which **forfeits the match**.
 
-### **2.5 Training vs. Inference Feature Extraction Pipeline**
+**Multi-select is out of scope for the network.** MAIN is always `minCount == maxCount == 1`
+(measured: 2,268/2,268). Selections requiring 0, or 2+, indices occur only in non-MAIN contexts
+and are therefore entirely the fallback's responsibility. §7.3 specifies the general head for
+when scope expands.
 
- \[ INFERENCE PIPELINE \]                            \[ TRAINING PIPELINE (Replays/Logs) \]  
-  obs.current  ──► Board State Extractor ──► (1, 912\)   Game Log Entry ──► State Reconstruction ──► (1, 912\)  
-  obs.select   ──► Action Option Matrix ──► (k, 16\)    Legal Moves at t ──► Candidate Matrix    ──► (k, 16\)  
-                                                        Target Move t   ──► Ground Truth Index y ──► integer ∈ \[0, k-1\]
+---
 
-> * **Inference Mode:** Reads obs.current and obs.select.option directly from the live cabt engine.  
-> * **Training Mode (Behavioral Cloning / Imitation Learning):**  
-  1. Reconstructs state $s\_t$ at time $t$ from game logs.  
-  2. Reconstructs all $k$ valid candidate options $\\{a\_1, a\_2, \\dots, a\_k\\}$ available to the player at turn $t$.  
-  3. Identifies the index $y \\in \[0, k-1\]$ of the move actually chosen by the expert.  
-  4. Optimizes the Cross-Entropy loss over the $k$ candidates:
+## **2. Static card features (offline)**
 
-$$\\mathcal{L}\_{\\text{BC}} \= \-\\log P(a\_y \\mid s\_t) \= \-\\log \\frac{e^{z\_y}}{\\sum\_{j=0}^{k-1} e^{z\_j}}$$
+**Source: the engine, not the CSV.** `cg.api.all_card_data()` returns typed `CardData`
+(`cardId, name, cardType, retreatCost, hp, weakness, resistance, energyType, basic, stage1,
+stage2, ex, megaEx, tera, aceSpec, evolvesFrom, skills, attacks`) and `all_attack()` returns
+`Attack` (`attackId, name, text, damage, energies`) for all 1,556 attacks. This avoids parsing
+`{G}` symbols, `50+`/`20x` damage suffixes, and the CSV's 2,022-rows-for-1,267-cards layout
+(one row per attack), and is guaranteed consistent with the engine judging the match.
 
-## **3\. Board State Encoder Implementations**
+`EN_Card_Data.csv` remains tracked as a human-readable reference and as a fallback source; it is
+not on the runtime path.
 
-Both encoders implement the abstract interface:  
-forward(obs\_dict: dict) \-\> Tensor\[shape=(1, 256)\]
+### **2.1 `StaticCardFeatureTable` — shape (1268, 72)**
 
-### **3.1 Option A: Baseline MLP Board State Encoder**
+Row index **is** the card ID. Row 0 is left zeroed so IDs 1..1267 index directly, eliminating
+the off-by-one convention that must otherwise be kept in sync across the extractor, the table
+builder, and the standalone agent.
 
-Fast, deterministic projection using dense layers.  
-Raw State (1, 912\) ──► Linear(912 → 512\) ──► ReLU ──► Linear(512 → 256\) ──► State Embedding s (1, 256\)
+| Index | Feature | Encoding |
+| :---- | :---- | :---- |
+| 0..6 | `cardType` one-hot | POKEMON, ITEM, TOOL, SUPPORTER, STADIUM, BASIC_ENERGY, SPECIAL_ENERGY |
+| 7..9 | Stage one-hot | `basic`, `stage1`, `stage2` |
+| 10..13 | Rule flags | `ex`, `megaEx`, `tera`, `aceSpec` |
+| 14 | Base HP | `hp / 380.0` |
+| 15 | Retreat cost | `retreatCost / 4.0` |
+| 16..27 | `energyType` one-hot | 12 `EnergyType` values |
+| 28..39 | Weakness one-hot | 12; all-zero when `None` |
+| 40..51 | Resistance one-hot | 12; all-zero when `None` |
+| 52 | Attack count | `len(attacks) / 2.0` (max 2) |
+| 53..54 | Attack 0 | `damage / 350.0`, `len(energies) / 5.0` |
+| 55..56 | Attack 1 | same; zeros when absent |
+| 57..68 | Attack cost histogram | count of each `EnergyType` across all attacks, ÷ 5.0 |
+| 69 | Has ability | `len(skills) > 0` |
+| 70 | Evolves from something | `evolvesFrom is not None` |
+| 71 | Reserved | 0.0 |
 
-#### **Layer Configuration & Shapes:**
+Built once by `scripts/build_static_features.py` → `data/processed/static_feature_table.pt`.
+**Design rule: never call `all_card_data()` or read the CSV inside the turn loop.**
 
-> 1. input\_layer: Concatenated raw state tensor (1, 912).  
-> 2. projector\_l1: nn.Linear(in\_features=912, out\_features=512)  
-> 3. activation\_l1: nn.ReLU()  
-> 4. projector\_l2: nn.Linear(in\_features=512, out\_features=256)  
-> 5. output: State Embedding $\\mathbf{s} \\in \\mathbb{R}^{1 \\times 256}$.
+---
 
-### **3.2 Option B: Drop-In Transformer Board State Encoder**
+## **3. Dynamic card features — 24 dims**
 
-Attention-based encoder modeling dynamic relational interactions between cards.  
-                        \[ Sequence Assembly \]  
- \[CLS\] Token (1,128) \+ Zone 0  ──► Token 0  ┐  
- 12 Field Slots     \+ Zone 1..12 ──► Tokens 1..12 ├──► Sequence Tensor (1, L, 128\)  
- N Hand Cards       \+ Zone 13    ──► Tokens 13..L-1  
- Game Scalars       \+ Zone 14    ──► Token L  ┘  
-                                     │  
-                                     ▼  
-                        \[ Transformer Stack (2 Layers) \]  
-                        Multi-Head Self-Attention (d\_model=128, heads=4)  
-                                     │  
-                                     ▼  
-                        \[ Extract Updated \[CLS\] Token \]  
-                             cls\_output: (1, 128\)  
-                                     │  
-                                     ▼  
-                        \[ Projection Head \]  
-                        Linear(128 → 256\) ──► ReLU ──► Linear(256 → 256\)  
-                                     │  
-                                     ▼  
-                         State Embedding s (1, 256\)
+Per Pokémon instance in play, from `Pokemon` and its owning `PlayerState`:
 
-#### **Layer Configuration & Hyperparameters:**
+| Index | Feature | Encoding |
+| :---- | :---- | :---- |
+| 0 | Current HP ratio | `hp / maxHp` |
+| 1 | Max HP | `maxHp / 380.0` |
+| 2 | Attached energy count | `len(energies) / 5.0` |
+| 3..14 | Attached energy histogram | count per `EnergyType` ÷ 5.0 |
+| 15 | Tools attached | `len(tools)` (max 1 observed) |
+| 16 | Pre-evolution depth | `len(preEvolution) / 2.0` |
+| 17 | Played this turn | `appearThisTurn` |
+| 18 | Is Active | 1.0 for the active slot |
+| 19..23 | Status flags | `poisoned, burned, asleep, paralyzed, confused` — from `PlayerState`, so **non-zero only in the active slot** |
 
-> * **Token Dimension (**$d\_{\\text{model}}$**):** $128$  
-> * **Location Embeddings:** nn.Embedding(num\_embeddings=16, embedding\_dim=128)  
-  * Zone IDs: 0=\[CLS\], 1=Self Active, 2..6=Self Bench, 7=Opp Active, 8..12=Opp Bench, 13=Hand, 14=Discard, 15=Scalars.  
-> * **Classification Token:** nn.Parameter(torch.randn(1, 1, 128))  
-> * **Transformer Stack:** nn.TransformerEncoder(encoder\_layer, num\_layers=2)  
-  * d\_model: $128$  
-  * nhead: $4$ ($d\_{\\text{head}} \= 32$)  
-  * dim\_feedforward: $256$ ($2 \\times d\_{\\text{model}}$)  
-  * activation: "relu"  
-  * batch\_first: True  
-> * **Output Projection Head:**  
-  * Linear(128, 256\) $\\to$ ReLU() $\\to$ Linear(256, 256\)
+Empty bench slots are the zero vector.
 
-## **4\. Action Encoder & Joint Action-Scoring Network**
+### **3.1 Card instance vector**
 
-### **4.1 Action Encoder MLP**
+```
+e_card = [ f_static (72) ; e_id (16) ; f_dynamic (24) ]  ∈ R^112
+         ── Linear(112 → 64) → ReLU → Linear(64 → 64) ──►  R^64
+```
 
-Converts raw candidate action vectors into action embeddings.
+`e_id = nn.Embedding(1268, 16)`. The static table is a **registered buffer**, never a parameter —
+it must not receive gradients, and it must travel with the checkpoint.
 
-> * **Input Matrix:** $\\mathbf{A}\_{\\text{raw}} \\in \\mathbb{R}^{k \\times 16}$  
-> * **Architecture:**  
-  * Linear(16, 64\) $\\to$ ReLU()  
-  * Linear(64, 64\)  
-> * **Output Matrix:** $\\mathbf{A}\_{\\text{emb}} \\in \\mathbb{R}^{k \\times 64}$
+---
 
-### **4.2 Joint Scorer & Output Normalization**
+## **4. Board state — 984 dims**
 
-Combines board context with action descriptors to evaluate each candidate.  
- State Embedding s (1, 256\)                       Action Embeddings A\_emb (k, 64\)  
-            │                                                    │  
-            ▼                                                    │  
-   .expand(k, \-1)                                                │  
-            │                                                    │  
-            ▼                                                    │  
- Expanded State (k, 256\)                                         │  
-            │                                                    │  
-            └─────────────────────────┬──────────────────────────┘  
-                                      │  
-                                      ▼  
-                        torch.cat(\[..., ...\], dim=1)  
-                                      │  
-                                      ▼  
-                         Joint Features Matrix (k, 320\)  
-                                      │  
-                                      ▼  
-                        Joint Scorer MLP (320 → 128 → 1\)  
-                        Linear(320 → 128\) ──► ReLU ──► Linear(128 → 1\)  
-                                      │  
-                                      ▼  
-                          Raw Logit Matrix (k, 1\)  
-                                      │  
-                                      ▼  
-                             .squeeze(-1)  
-                                      │  
-                                      ▼  
-                            Logit Vector z (k,)  
-                                      │  
-                                      ▼  
-                           F.softmax(z, dim=0)  
-                                      │  
-                                      ▼  
-                       Action Probabilities P(a|s) (k,)
+`benchMax` is 5 for both players in every observed game, so the 12 fixed field slots are sound.
 
-## **5\. Tensor Dimension & Shape Cheat Sheet**
+| Group | Dims | Content |
+| :---- | ----: | :---- |
+| Field slots | 12 × 64 = **768** | self Active, self Bench 0..4, opp Active, opp Bench 0..4; unoccupied slots are zeros |
+| Hand | **64** | mean-pool of self hand card vectors; zeros when empty. `PlayerState.hand` is `None` for the opponent — only `handCount` is observable |
+| Self discard | **64** | 1268-dim count histogram ÷ 45.0 → `Linear(1268, 64)` → ReLU |
+| Opp discard | **64** | same projection, separate parameters |
+| Global scalars | **24** | §4.1 |
+| **Total** | **984** | |
 
-The table below serves as the definitive reference for tensor shapes across the network pipeline:
+### **4.1 Global scalars (24)**
 
-| Module / Operation | Input Tensor Name | Input Shape | Transformation / Layer | Output Tensor Name | Output Shape |
-| :---- | :---- | :---- | :---- | :---- | :---- |
-| **Card Feature Lookup** | card\_id | (N,) | StaticCardFeatureTable \+ nn.Embedding(1267, 8\) | card\_features | (N, 40\) |
-| **Card Projection** | card\_instance | (N, 48\) | Linear(48, 64\) \+ ReLU | v\_card | (N, 64\) |
-| **Discard Projection** | discard\_hist | (1, 1267\) | Linear(1267, 64\) \+ ReLU | v\_discard | (1, 64\) |
-| **MLP State Encoder** | raw\_state | (1, 912\) | Linear(912, 512\) \-\> ReLU \-\> Linear(512, 256\) | state\_emb | **(1, 256\)** |
-| **Transformer State Enc.** | token\_sequence | (1, L, 128\) | TransformerEncoder(2L) \-\> \[CLS\] \-\> Linear(128, 256\) | state\_emb | **(1, 256\)** |
-| **State Expansion** | state\_emb | (1, 256\) | .expand(k, \-1) | state\_expanded | **(k, 256\)** |
-| **Action Encoder** | valid\_actions | (k, 16\) | Linear(16, 64\) \-\> ReLU \-\> Linear(64, 64\) | action\_embs | **(k, 64\)** |
-| **Feature Fusion** | \[state, action\] | (k, 256), (k, 64\) | torch.cat(\[state\_expanded, action\_embs\], dim=1) | joint\_features | **(k, 320\)** |
-| **Joint Layer 1** | joint\_features | (k, 320\) | Linear(320, 128\) \+ ReLU | joint\_h1 | (k, 128\) |
-| **Joint Layer 2** | joint\_h1 | (k, 128\) | Linear(128, 1\) | raw\_scores | (k, 1\) |
-| **Dimension Squeeze** | raw\_scores | (k, 1\) | .squeeze(-1) | logits | **(k,)** |
-| **Action Softmax** | logits | (k,) | F.softmax(logits, dim=0) | probabilities | **(k,)** |
+`self_prizes/6`, `opp_prizes/6` — note prize cards are facedown, so the count is `len(prize)`,
+**not** a count of non-`None` entries; `self_deck/60`, `opp_deck/60`; `self_hand/13`,
+`opp_hand/13`; `turn/32`; `turnActionCount/72`; `yourIndex`; `firstPlayer == yourIndex`;
+`supporterPlayed`; `stadiumPlayed`; `energyAttached`; `retreated`; `stadium present`;
+`self_bench/5`; `opp_bench/5`; `self_discard/45`; `opp_discard/45`; `minCount/5`; `maxCount/5`;
+`k/80`; two reserved slots. (22 populated + 2 reserved = 24.)
 
-## **6\. Complete PyTorch Implementation Reference**
+---
 
-import torch  
-import torch.nn as nn  
-import torch.nn.functional as F
+## **5. Action encoding — the corrected design**
 
-class DynamicActionScorerNetwork(nn.Module):  
-    """  
-    Complete Pokémon TCG AI Action Scoring Pipeline supporting interchangeable  
-    MLP and Transformer state encoders.  
-    """  
-    def \_\_init\_\_(  
-        self,   
-        state\_encoder: nn.Module,   
-        action\_in\_dim: int \= 16,   
-        action\_embed\_dim: int \= 64,   
-        state\_embed\_dim: int \= 256  
-    ):  
-        super().\_\_init\_\_()  
-        self.state\_encoder \= state\_encoder  
-          
-        \# Action Encoder MLP (16 \-\> 64 \-\> 64\)  
-        self.action\_encoder \= nn.Sequential(  
-            nn.Linear(action\_in\_dim, action\_embed\_dim),  
-            nn.ReLU(),  
-            nn.Linear(action\_embed\_dim, action\_embed\_dim)  
-        )  
-          
-        \# Joint Scorer Head ( (256 \+ 64\) \-\> 128 \-\> 1 )  
-        joint\_in\_dim \= state\_embed\_dim \+ action\_embed\_dim  
-        self.joint\_scorer \= nn.Sequential(  
-            nn.Linear(joint\_in\_dim, 128),  
-            nn.ReLU(),  
-            nn.Linear(128, 1\)  
-        )
+Each of the k candidate options is encoded as three concatenated blocks, then projected:
 
-    def forward(self, obs\_dict: dict, valid\_actions\_tensor: torch.Tensor):  
-        """  
-        obs\_dict: Structured dictionary containing raw board observation  
-        valid\_actions\_tensor: Tensor of shape (k, 16\) containing candidate action vectors  
-        returns: Logits of shape (k,), Probabilities of shape (k,)  
-        """  
-        k \= valid\_actions\_tensor.shape\[0\] \# Number of legal candidate actions  
-          
-        \# 1\. Encode Board State \-\> Shape: (1, 256\)  
-        state\_emb \= self.state\_encoder(obs\_dict)  
-          
-        \# 2\. Virtual State Expansion (zero extra memory) \-\> Shape: (k, 256\)  
-        state\_expanded \= state\_emb.expand(k, \-1)  
-          
-        \# 3\. Encode Action Matrix \-\> Shape: (k, 64\)  
-        action\_embs \= self.action\_encoder(valid\_actions\_tensor)  
-          
-        \# 4\. Feature Fusion via Concatenation \-\> Shape: (k, 320\)  
-        joint\_features \= torch.cat(\[state\_expanded, action\_embs\], dim=1)  
-          
-        \# 5\. Score State-Action Pairs \-\> Shape: (k, 1\) \-\> Squeezed to (k,)  
-        logits \= self.joint\_scorer(joint\_features).squeeze(-1)  
-          
-        \# 6\. Normalize across candidate actions \-\> Shape: (k,)  
-        probabilities \= F.softmax(logits, dim=0)  
-          
-        return logits, probabilities  
+```
+a_i = [ structural (64) ; v_source_card (64) ; v_target_slot (64) ]  ∈ R^192
+      ── Linear(192 → 64) → ReLU → Linear(64 → 64) ──►  R^64
+```
+
+The two learned blocks are what make the encoding injective. Both reuse machinery already
+built for the board state — no new parameters beyond the projection.
+
+### **5.1 Structural block (64)**
+
+| Index | Field | Encoding |
+| :---- | :---- | :---- |
+| 0..16 | `type` one-hot | 17 `OptionType` values |
+| 17..29 | `area` one-hot | 13 = 12 `AreaType` + "absent" at index 0 |
+| 30 | `index` | `/ 48.0` (observed 0..45) |
+| 31..43 | `inPlayArea` one-hot | 13, same convention |
+| 44 | `inPlayIndex` | `/ 5.0` (observed 0..4) |
+| 45 | Has attack | `attackId is not None` |
+| 46..47 | Attack stats | `damage/350`, `len(energies)/5` via `ATTACKS[attackId]` |
+| 48..59 | Attack cost histogram | per `EnergyType`, ÷ 5.0 |
+| 60 | `energyIndex` | `/ 5.0` |
+| 61 | `toolIndex` | as-is |
+| 62 | `number` | `/ 8.0` |
+| 63 | Targets self | `playerIndex == yourIndex` |
+
+### **5.2 Source card block (64)**
+
+Resolve `(area, index)` against `obs.current` to the card the option acts *with* — hand card,
+discard card, deck card, stadium — and embed it with the **same** `HybridCardEncoder` used for
+the board (§3.1), with dynamic features zeroed for cards not in play. Zeros when `area` is
+absent or the reference cannot be resolved.
+
+This is what tells the model *which* card is being played, information the original encoding
+discarded entirely.
+
+### **5.3 Target slot block (64)**
+
+When `inPlayArea`/`inPlayIndex` are present, reuse the **already-computed field-slot vector**
+for that target (one of the 12 slots from §4) — a gather, not a recomputation, so it costs
+nothing at inference. Zeros when absent.
+
+This is what distinguishes "attach to Active" from "attach to Bench 0", the exact collision that
+broke the original encoding.
+
+### **5.4 Injectivity requirement**
+
+> Any two options within one decision that differ in engine semantics **must** differ in their
+> encoded vector. This is a testable invariant, not an aspiration: assert a zero collision rate
+> over a sample of real decisions before training. Regressions here are silent — they degrade
+> play strength while training metrics continue to improve.
+
+---
+
+## **6. Board state encoders**
+
+Both implement the same interface, `forward(obs_dict) -> Tensor[B, 256]`, so they remain
+interchangeable without touching the scorer or the submission code.
+
+### **6.1 Baseline MLP**
+
+```
+raw state (B, 984) ─► Linear(984, 512) ─► ReLU ─► Linear(512, 256) ─► s (B, 256)
+```
+
+### **6.2 Transformer**
+
+Tokens, each summed with a learned zone embedding `nn.Embedding(16, 128)`:
+
+```
+token 0        [CLS]                zone 0
+tokens 1..12   12 field slots       zones 1..12
+tokens 13..    self hand cards      zone 13
+               self/opp discard     zone 14
+last           global scalars       zone 15
+```
+
+`nn.TransformerEncoder(num_layers=2, d_model=128, nhead=4, dim_feedforward=256,
+activation="relu", batch_first=True)`; take the updated `[CLS]`, then
+`Linear(128, 256) → ReLU → Linear(256, 256)`.
+
+Card vectors are 64-dim and tokens are 128-dim, so a `Linear(64, 128)` lift precedes assembly.
+Hand size varies (max 13, p99 11), so batched training requires padding plus a
+`src_key_padding_mask` — without the mask, padding attends and silently corrupts `[CLS]`.
+
+---
+
+## **7. Joint scorer and output head**
+
+### **7.1 Scoring**
+
+```
+s (B, 256) ──unsqueeze/expand──► (B, k, 256)
+A_emb (B, k, 64)
+        └─► cat(dim=-1) ─► (B, k, 320)
+            ─► Linear(320, 128) → ReLU → Linear(128, 1) ─► (B, k, 1) ─► squeeze ─► logits (B, k)
+```
+
+Padded candidates are masked with `logits.masked_fill(~mask, -1e9)` **before** any softmax.
+Omitting the mask leaks probability mass onto padding and biases every gradient.
+
+### **7.2 MAIN head (single-select)**
+
+`F.softmax(logits, dim=-1)`; training loss is cross-entropy against the expert's chosen index:
+
+```
+L_BC = -log P(a_y | s_t)
+```
+
+At inference return `[argmax]`. Valid because MAIN is always `minCount == maxCount == 1`.
+
+### **7.3 General head (for future scope expansion)**
+
+When contexts with `maxCount > 1` are brought into the model, the same scorer is reused with a
+multi-hot target and per-candidate `BCEWithLogitsLoss`. Selection becomes: sort logits
+descending, take the top *m*, where
+
+```
+m = clamp(#(sigmoid(logit) > 0.5), minCount, maxCount)
+```
+
+`minCount == 0` is legal and means the empty selection may be returned. **Returning a selection
+outside `[minCount, maxCount]`, or containing duplicates, forfeits the match** — this must be
+enforced by a final clamp in the agent, independent of what the network produces.
+
+### **7.4 Candidate count**
+
+`K_MAX = 80` (observed max 67; mean 11.0, p99 34). Padding for batching is fine.
+**Truncation is not**: dropping candidates can remove the expert's chosen move, leaving the
+target index undefined and injecting label noise. Decisions with `k > K_MAX` are excluded from
+the training set and handled by the fallback at inference.
+
+---
+
+## **8. Tensor shape reference**
+
+| Module | Input | Input shape | Transformation | Output shape |
+| :---- | :---- | :---- | :---- | :---- |
+| Static lookup | `card_id` | (N,) | `StaticCardFeatureTable[id]` | (N, 72) |
+| Card instance | static+id+dynamic | (N, 112) | `Linear(112,64)→ReLU→Linear(64,64)` | **(N, 64)** |
+| Discard projection | histogram | (B, 1268) | `Linear(1268,64)+ReLU` | (B, 64) |
+| MLP encoder | raw state | (B, 984) | `Linear(984,512)→ReLU→Linear(512,256)` | **(B, 256)** |
+| Transformer encoder | tokens | (B, L, 128) | `TransformerEncoder(2)`→`[CLS]`→proj | **(B, 256)** |
+| Action structural | option fields | (B, k, 64) | — | (B, k, 64) |
+| Action assembly | struct+source+target | (B, k, 192) | `Linear(192,64)→ReLU→Linear(64,64)` | **(B, k, 64)** |
+| State expansion | `state_emb` | (B, 256) | `unsqueeze(1).expand(-1,k,-1)` | (B, k, 256) |
+| Fusion | [state, action] | (B,k,256),(B,k,64) | `cat(dim=-1)` | **(B, k, 320)** |
+| Scorer | joint | (B, k, 320) | `Linear(320,128)→ReLU→Linear(128,1)` | (B, k, 1) |
+| Squeeze + mask | raw scores | (B, k, 1) | `squeeze(-1)`, `masked_fill` | **(B, k)** |
+| Softmax | logits | (B, k) | `F.softmax(dim=-1)` | **(B, k)** |
+
+---
+
+## **9. Reproducing the measurements**
+
+Every number in §0–§7 came from the live engine. To re-derive after an engine update:
+
+- **Enum widths and card DB** — `all_card_data()`, `all_attack()`, and `len(list(OptionType))`
+  etc. Yields 1,267 cards / 1,556 attacks / max HP 380 / max damage 350 / max retreat 4 /
+  max 2 attacks per card / max 5 energies per attack.
+- **Context distribution, k ranges, min/maxCount** — wrap both agents in `run_match` with a
+  recorder that tallies `obs["select"]` per `SelectContext`, over ≥30 lucario-vs-iono games.
+- **Encoding injectivity (§5.4)** — for each MAIN decision, hash each option under the candidate
+  encoding and count decisions containing duplicate hashes. **The target is 0%.** The original
+  encoding scored 60.5%.
+
+Treat the injectivity check as a permanent regression test, not a one-off: it is the only cheap
+signal that distinguishes "the features are broken" from "the model needs more training", and
+the two look identical on a loss curve.

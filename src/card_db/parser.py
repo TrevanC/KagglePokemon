@@ -1,5 +1,11 @@
 """Parse data/raw/EN_Card_Data.csv into structured per-card records.
 
+NOT ON THE PIPELINE PATH. src/card_db/static_table.py builds the static
+feature table from the engine (cg.api.all_card_data() / all_attack()), which
+returns typed records and is guaranteed consistent with the engine judging the
+match. This module exists only for human-readable inspection of the CSV and as
+a fallback source. See docs/Technical Specification.md §2.
+
 The CSV is *not* one row per card: 2022 rows cover 1267 unique card IDs
 (1..1267), because a card gets one row per attack — 723 IDs span 2-3 rows
 (e.g. ID 21, Scrafty, has "Nab 'n' Dash" and "High Jump Kick"). Group by

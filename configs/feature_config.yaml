@@ -1,37 +1,65 @@
 # Card pool & feature/lookup-table dimensions.
 #
 # Consumed by: src/card_db/static_table.py, src/env/state_extractor.py
-# Reference: docs/Technical Specification.md §2
+# Reference: docs/Technical Specification.md §2-§5
+#
+# All dimensions below were measured against the live engine, not assumed.
+# See spec §0 for what changed from the original draft and §9 to re-derive.
 
 cards:
-  num_cards:           # 1267 unique card IDs in EN_Card_Data.csv
-  csv_path:            # "data/raw/EN_Card_Data.csv"
+  num_cards:           # 1267 unique IDs (1..1267)
+  table_rows:          # 1268 — row index IS the card ID; row 0 zeroed, no off-by-one
   static_table_path:   # "data/processed/static_feature_table.pt"
+  # Source is the engine (all_card_data() / all_attack()), NOT the CSV.
+  # data/raw/EN_Card_Data.csv is a human-readable reference only, never on the
+  # runtime path: it has 2022 rows for 1267 cards (one row per attack).
 
-# Per-card feature widths. static + id_embed + dynamic = card_in_dim -> card_out_dim
+# Per-card vector: static + id_embed + dynamic = card_in_dim -> card_out_dim
 card_vector:
-  static_dim:          # 32, precomputed lookup row
-  id_embed_dim:        # 8, nn.Embedding(num_cards, ...)
-  dynamic_dim:         # 8: hp ratio, energy ratio, 6 status flags
-  card_out_dim:        # 64, after Linear + ReLU
+  static_dim:          # 72  (spec §2.1)
+  id_embed_dim:        # 16  nn.Embedding(1268, 16)
+  dynamic_dim:         # 24  (spec §3)
+  card_in_dim:         # 112 = 72 + 16 + 24
+  card_out_dim:        # 64
 
-# Board state composition -> raw_state_dim
+# Board state composition -> raw_state_dim (spec §4)
 board:
-  num_field_slots:     # 12: self active + 5 bench, opp active + 5 bench
-  hand_pool_dim:       # 64, mean-pooled over hand cards
-  discard_proj_dim:    # 64, Linear(num_cards -> ...) over the discard histogram
-  global_scalar_dim:   # 16: prizes, deck counts, turn flags, padded
-  raw_state_dim:       # 912 = 12*64 + 64 + 64 + 16
+  num_field_slots:     # 12 — benchMax measured as 5 for both players in all games
+  hand_pool_dim:       # 64, mean-pooled; opponent hand is None, only handCount visible
+  discard_proj_dim:    # 64 each for self and opponent, Linear(1268 -> 64)
+  global_scalar_dim:   # 24 (spec §4.1)
+  raw_state_dim:       # 984 = 12*64 + 64 + 64 + 64 + 24
 
-# Candidate action matrix (k, action_in_dim)
+# Candidate action encoding (spec §5)
 actions:
-  action_in_dim:       # 16: 10 option-type one-hot + card id + slot idx + 4 padding
-  max_candidates:      # k upper bound, ~50
+  structural_dim:      # 64  option fields: type/area/index/inPlayArea/inPlayIndex/attack/...
+  source_card_dim:     # 64  the card the option acts WITH, resolved from (area, index)
+  target_slot_dim:     # 64  gathered from the 12 field slots via (inPlayArea, inPlayIndex)
+  action_in_dim:       # 192 = 64 + 64 + 64
+  action_embed_dim:    # 64
+  k_max:               # 80  observed max 67, mean 11.0, p99 34
+  # Pad to k_max for batching. NEVER truncate: dropping candidates can drop the
+  # expert's chosen move and leave the training target undefined.
 
-# Normalization divisors used when building features.
+# Enum widths (from cg.api — do not hardcode guesses, these were all wrong in v1)
+enums:
+  option_types:        # 17
+  energy_types:        # 12
+  card_types:          # 7
+  area_types:          # 12 (encoded as 13: index 0 means "absent")
+  status_flags:        # 5  poisoned/burned/asleep/paralyzed/confused; Active only
+  select_contexts:     # 49 — the model covers MAIN only; see spec §1
+
+# Normalization divisors, measured from the card DB and real play.
 normalization:
-  max_hp:              # 340.0
-  max_damage:          # 300.0
+  max_hp:              # 380.0
+  max_damage:          # 350.0
   max_retreat_cost:    # 4.0
+  max_energies_attack: # 5.0
   deck_size:           # 60.0
-  prize_count:         # 6.0
+  prize_count:         # 6.0   use len(prize); prize cards are facedown (all None)
+  max_hand:            # 13.0
+  max_discard:         # 45.0
+  max_zone_index:      # 48.0
+  max_turn:            # 32.0
+  max_turn_actions:    # 72.0

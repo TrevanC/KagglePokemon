@@ -1,28 +1,45 @@
-"""Build the StaticCardFeatureTable: a (1267, 32) precomputed lookup tensor.
+"""Build the StaticCardFeatureTable: a (1268, 72) precomputed lookup tensor.
 
-Computed once offline so the agent never parses strings or CSV rows during a
-live turn. Written to data/processed/static_feature_table.pt by
-scripts/build_static_features.py, and loaded at agent init.
+Source is the ENGINE, not the CSV (spec §2). cg.api.all_card_data() returns
+typed CardData -- cardId, name, cardType, retreatCost, hp, weakness, resistance,
+energyType, basic/stage1/stage2, ex/megaEx/tera/aceSpec, evolvesFrom, skills,
+attacks -- and all_attack() returns Attack (attackId, name, text, damage,
+energies) for all 1556 attacks. That sidesteps the CSV's "{G}" symbols, its
+"50+"/"20x" damage suffixes, and its 2022-rows-for-1267-cards layout, and it
+stays consistent with the engine actually judging the match.
 
-Feature index map (technical specification §2.1):
+Row index IS the card ID. Row 0 is zeroed so IDs 1..1267 index directly --
+this removes the off-by-one convention that would otherwise have to be kept in
+sync across this file, state_extractor.py, and standalone_agent.py.
 
-    0..2    Category one-hot        [is_pokemon, is_trainer, is_energy]
-    3..5    Stage one-hot           [is_basic, is_stage1, is_stage2]
-    6       Base HP                 hp / 340.0            -> [0, 1]
-    7..16   Element type one-hot    10 Pokémon types (Grass, Fire, Water, ...)
-    17      Primary attack damage   damage / 300.0        -> [0, 1]
-    18      Retreat cost            retreat / 4.0         -> [0, 1]
-    19..31  Reserved                energy costs, trainer effect flags (zero-padded)
+Feature index map (spec §2.1):
 
-Row index == card ID. IDs are 1-based in the CSV; decide on and document one
-indexing convention here (allocate 1268 rows, or subtract 1) and make
-src/env/state_extractor.py use the same one.
+     0..6    cardType one-hot     POKEMON, ITEM, TOOL, SUPPORTER, STADIUM,
+                                  BASIC_ENERGY, SPECIAL_ENERGY
+     7..9    stage one-hot        basic, stage1, stage2
+    10..13   rule flags           ex, megaEx, tera, aceSpec
+    14       base HP              hp / 380.0        (measured max, not 340)
+    15       retreat cost         retreatCost / 4.0
+    16..27   energyType one-hot   12 EnergyType values (not 10)
+    28..39   weakness one-hot     12; all-zero when None
+    40..51   resistance one-hot   12; all-zero when None
+    52       attack count         len(attacks) / 2.0
+    53..54   attack 0             damage / 350.0, len(energies) / 5.0
+    55..56   attack 1             same; zeros when absent
+    57..68   attack cost hist     per EnergyType across all attacks, / 5.0
+    69       has ability          len(skills) > 0
+    70       evolves from         evolvesFrom is not None
+    71       reserved             0.0
+
+Written once by scripts/build_static_features.py to
+data/processed/static_feature_table.pt. Design rule 2: never call
+all_card_data() or read the CSV inside the live turn loop.
 
 TODO: implement
-    build_static_table(records, num_cards=1267, feature_dim=32) -> torch.Tensor
+    build_static_table(rows=1268, feature_dim=72) -> torch.Tensor
     save_static_table(table, path) / load_static_table(path) -> torch.Tensor
     class StaticCardFeatureTable:
-        get_features(card_ids: Tensor) -> Tensor  # (..., 32) gather
+        get_features(card_ids: Tensor) -> Tensor  # (..., 72) gather
 
 Consumers: src/models/card_encoder.py, src/models/standalone_agent.py.
 """

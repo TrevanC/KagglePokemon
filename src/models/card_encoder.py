@@ -1,22 +1,28 @@
 """Hybrid card encoder: static features + learned ID embedding + dynamic state.
 
-Every card instance (on the field or in hand) becomes a 64-dim vector
-(technical specification §2.2):
+Every card instance becomes a 64-dim vector (spec §3.1):
 
-    e_card = [ f_static (32) ; e_id (8) ; f_dynamic (8) ]  in R^48
-             --Linear(48 -> 64) + ReLU-->  R^64
+    e_card = [ f_static (72) ; e_id (16) ; f_dynamic (24) ]  in R^112
+             --Linear(112 -> 64) -> ReLU -> Linear(64 -> 64)-->  R^64
 
-    f_static    StaticCardFeatureTable[card_id]  (src/card_db/static_table.py)
-    e_id        nn.Embedding(1267, 8)
-    f_dynamic   hp ratio, energy ratio, 6 status flags
+    f_static    StaticCardFeatureTable[card_id]  (src/card_db/static_table.py),
+                a (1268, 72) table indexed directly by card ID
+    e_id        nn.Embedding(1268, 16)
+    f_dynamic   24 dims: hp ratio, max hp, energy count + 12-wide energy
+                histogram, tools, pre-evolution depth, appearThisTurn,
+                is_active, and 5 status flags
                 (src/env/state_extractor.py::extract_card_dynamics)
 
-The static table is a buffer, not a parameter — it must not receive gradients,
-and should be registered so it travels with the checkpoint.
+This same encoder is reused for the action encoder's source-card block
+(spec §5.2) with dynamic features zeroed for cards not in play -- one set of
+card semantics shared by the board and the actions, rather than two.
+
+The static table is a registered BUFFER, not a parameter: it must not receive
+gradients, and it must travel with the checkpoint.
 
 TODO: implement
     class HybridCardEncoder(nn.Module):
-        __init__(static_table, num_cards=1267, id_embed_dim=8,
-                 static_dim=32, dynamic_dim=8, card_out_dim=64)
-        forward(card_ids: Tensor (B, N), dynamic: Tensor (B, N, 8)) -> Tensor (B, N, 64)
+        __init__(static_table, table_rows=1268, id_embed_dim=16,
+                 static_dim=72, dynamic_dim=24, card_out_dim=64)
+        forward(card_ids: Tensor (B, N), dynamic: Tensor (B, N, 24)) -> Tensor (B, N, 64)
 """
