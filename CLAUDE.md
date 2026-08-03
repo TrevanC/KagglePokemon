@@ -131,6 +131,38 @@ These reach into `pokemon-tcg-ai-battle/arena/` (`run_match`, `read_deck`, `load
 `runner.py`; `random`/`first`/`greedy` from `agents.py`) instead of reimplementing a match loop.
 Add the arena to `sys.path` rather than copying the engine bindings.
 
+## Kaggle episode replays (expert data)
+
+The official CLI has simulation-competition commands — they are not listed in the top-level
+`kaggle --help`, only under `kaggle competitions --help`:
+
+```bash
+kaggle competitions episodes <submission_id>       # list episodes for one of YOUR submissions
+kaggle competitions replay <episode_id> -p ./dir   # download episode-<id>-replay.json
+kaggle competitions logs <episode_id> <agent_idx>  # agent stderr/stdout for debugging
+```
+
+`kaggle auth login` (OAuth, browser flow) is enough — no session cookie or scraping. The internal
+`competitions.EpisodeService/*` HTTP endpoints reject both anonymous and OAuth-bearer requests;
+don't go down that path.
+
+**Discovery requires your own submission.** `episodes` takes a *submission* ID and returns nothing
+for other people's teams, so episode IDs are only enumerable once you have a submission on the
+leaderboard. The global index otherwise lives in Meta Kaggle (`Episodes.csv`, 6.3 GB;
+`EpisodeAgents.csv`, 21.8 GB) via `kaggle datasets download -f Episodes.csv kaggle/meta-kaggle`.
+
+**Each replay contains BOTH players' decisions**, and `replay["rewards"]` identifies the winner
+(`[-1, 1]` → player 1 won). Measured on episode 89083821: 120 decisions total, ~60 MAIN, split
+roughly evenly per player. So submitting even a mediocre agent yields training data from the
+*strong opponents* it faces — filter to the winner's side.
+
+> **Action alignment is off by one.** The action responding to the observation at `steps[i][p]`
+> is stored at `steps[i+1][p]["action"]`. Verified on a real replay: 120/120 legal under `+1`,
+> **79/120 under `+0`**. The naive alignment therefore looks *mostly* valid — it will not crash,
+> will not fail a legality check on most rows, and will silently train the policy on two-thirds
+> wrong labels. Any replay loader must use the `+1` offset and assert legality
+> (`minCount <= len(action) <= maxCount`, no duplicates, all indices `< len(option)`) on every row.
+
 ## Gotchas
 
 **Engine RNG is not seedable.** The engine owns all shuffles and coin flips, so individual games
