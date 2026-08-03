@@ -63,15 +63,22 @@ The engine asks for 49 different kinds of selection, not one. Measured frequency
 | `DISCARD` | 3.5% | 1..8 | 16% |
 | `TO_ACTIVE`, `DISCARD_ENERGY_CARD`, `SWITCH`, `SETUP_*`, `TO_BENCH`, `IS_FIRST`, `ACTIVATE`, `DRAW_COUNT`, … | 10.7% | — | varies |
 
-**This specification covers `SelectContext.MAIN` only.** All other contexts are served by a
-rule-based fallback (`src/evaluation/heuristics.py`). Two consequences follow, and both are
-load-bearing:
+**This specification covers `SelectContext.MAIN` only.** All other contexts **delegate to an
+existing complete agent** — no per-context handler is written. Both baselines are legal *by
+construction* for all 49 contexts, including the 34 that never appear in lucario-vs-iono play:
+`greedy_agent` terminates in `_pick_n`, which dedupes, caps at `maxCount`, and pads up to
+`minCount`; lucario scores every option and returns `desc_indices[:maxCount]`, which is always
+within `[minCount, maxCount]` because `maxCount ≤ len(option)`.
 
-1. **The fallback plays roughly half the game.** It is not an edge case. The agent's ceiling is
-   bounded by the quality of that hand-written half.
-2. **The fallback must be complete, not merely good.** Only 15 of the 49 contexts appear in
-   lucario-vs-iono play; the other 34 depend on cards outside those decks. An unhandled context
-   produces an illegal selection, which **forfeits the match**.
+Legality is therefore free. **Quality is not**, and that is the load-bearing consequence: the
+fallback plays roughly half the game, so the agent's ceiling is bounded by the baseline it
+delegates to, not by the network.
+
+Taken to its conclusion — with lucario as the fallback and a policy behaviorally cloned *from*
+lucario, the agent is lucario everywhere except MAIN, where it is an imperfect imitation of
+lucario. That is a strictly worse lucario. **The network only earns its place once MAIN is
+trained to beat lucario**, which requires either stronger data (top-player Kaggle replays) or
+self-play RL. Cloning the fallback you already delegate to is a null operation.
 
 **Multi-select is out of scope for the network.** MAIN is always `minCount == maxCount == 1`
 (measured: 2,268/2,268). Selections requiring 0, or 2+, indices occur only in non-MAIN contexts
