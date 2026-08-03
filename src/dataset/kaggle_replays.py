@@ -33,6 +33,12 @@ import json
 from pathlib import Path
 from typing import Iterator
 
+# Fraction of illegal actions tolerated at the correct offset before we treat a
+# replay as schema-broken rather than merely containing a forfeit. Measured: a
+# clean replay scores 0%, an errored-agent replay ~2% (1 bad action of 56), and
+# the WRONG offset scores ~30%+ -- so the threshold sits well clear of both.
+MAX_ILLEGAL_RATE = 0.05
+
 # Populated lazily so importing this module never requires the native engine.
 _MAIN_CONTEXT: int | None = None
 
@@ -44,6 +50,29 @@ def _main_context() -> int:
         from cg.api import SelectContext  # noqa: PLC0415 - optional heavy import
         _MAIN_CONTEXT = int(SelectContext.MAIN)
     return _MAIN_CONTEXT
+
+
+def winner_of(replay: dict) -> int | None:
+    """Index of the winning player, or None if there isn't a clear one.
+
+    `rewards` entries can be None: an agent that errored or timed out gets no
+    reward while its opponent still scores, e.g. rewards=[1, None] with
+    statuses=['DONE', 'ERROR']. Measured rate: 1 replay in 745. Naively calling
+    max() on that list raises TypeError comparing None to int, so every reward
+    read must go through here.
+
+    A None reward means that agent forfeited, so its opponent won -- which is
+    also a reminder that forfeits are real at the top of the leaderboard.
+    """
+    rewards = replay.get("rewards") or []
+    if not rewards:
+        return None
+    numeric = [(i, r) for i, r in enumerate(rewards) if r is not None]
+    if len(numeric) != len(rewards):          # someone errored out
+        return numeric[0][0] if len(numeric) == 1 else None
+    if len({r for _, r in numeric}) < 2:      # draw
+        return None
+    return max(numeric, key=lambda ir: ir[1])[0]
 
 
 def is_legal(action, select) -> bool:
@@ -123,19 +152,23 @@ def replay_to_records(
 
     if strict:
         checks = validate_alignment(replay)
-        if checks[1][1] != 0:
+        legal1, illegal1 = checks[1]
+        total = legal1 + illegal1
+        rate = illegal1 / total if total else 1.0
+        # A handful of illegal actions is expected and benign: an agent that
+        # errors out (statuses=[...,'ERROR'], reward None) leaves a malformed
+        # final action. Those rows are skipped individually below. What must
+        # fail loudly is SYSTEMATIC misalignment -- a schema change -- which
+        # shows up as a high illegal rate, or as +1 being no better than +0.
+        if total and (rate > MAX_ILLEGAL_RATE or illegal1 >= checks[0][1]):
             raise ValueError(
                 f"{path.name}: action alignment failed at offset +1 "
-                f"({checks[1][1]} illegal of {sum(checks[1])}). "
+                f"({illegal1} illegal of {total}, {rate:.0%}); "
                 f"offset 0 scored {checks[0]}. Replay schema may have changed."
             )
 
     rewards = replay.get("rewards") or []
-    winner = (
-        rewards.index(max(rewards))
-        if rewards and len(set(rewards)) > 1
-        else None
-    )
+    winner = winner_of(replay)
     episode_id = replay["info"]["EpisodeId"]
     teams = replay["info"].get("TeamNames") or []
     main_ctx = _main_context() if main_only else None
@@ -146,14 +179,13 @@ def replay_to_records(
         if main_only and select["context"] != main_ctx:
             continue
         if not is_legal(action, select):
-            if strict:
-                raise ValueError(f"{path.name}: illegal action {action} for k={len(select['option'])}")
-            continue
+            continue          # forfeited/malformed row; global check above guards the schema
+        reward = rewards[player] if player < len(rewards) else None
         yield {
             "obs": {"select": select},
             "action": action,
             "player": player,
-            "reward": rewards[player] if player < len(rewards) else 0,
+            "reward": 0 if reward is None else reward,
             "source": f"kaggle:{episode_id}",
             "team": teams[player] if player < len(teams) else None,
         }

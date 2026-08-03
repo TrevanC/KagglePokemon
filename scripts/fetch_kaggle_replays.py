@@ -37,6 +37,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.dataset.kaggle_replays import winner_of  # noqa: E402
+
 COMPETITION = "pokemon-tcg-ai-battle"
 DEFAULT_OUT = Path("data/replays/kaggle")
 
@@ -73,11 +76,13 @@ def fetch_replay(episode_id: str, out_dir: Path) -> Path | None:
 
 
 def summarize(path: Path) -> dict:
-    """Cheap sanity read: who played, who won, how many MAIN decisions."""
+    """Cheap sanity read: who played, who won, how many decisions."""
     d = json.loads(path.read_text())
     steps = d["steps"]
     rewards = d.get("rewards") or []
-    winner = rewards.index(max(rewards)) if rewards and len(set(rewards)) > 1 else None
+    # Reward entries may be None when an agent errors out (statuses=[...,'ERROR']),
+    # so winner selection goes through the shared helper rather than max().
+    winner = winner_of(d)
     n_dec = sum(
         1 for step in steps for slot in step
         if slot.get("status") == "ACTIVE" and (slot.get("observation") or {}).get("select")
