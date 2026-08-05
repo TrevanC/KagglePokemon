@@ -47,5 +47,5 @@ checkpoint:
 
 logging:
   wandb_project: ptcg-ai-challenge
-  wandb_mode: disabled  # "online" | "offline" | "disabled"
+  wandb_mode: online  # "online" | "offline" | "disabled"
   log_every_n_steps: 50
