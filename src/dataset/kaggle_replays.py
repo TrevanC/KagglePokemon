@@ -136,6 +136,31 @@ def validate_alignment(replay: dict) -> dict:
     return out
 
 
+DECK_SIZE = 60
+
+
+def decks_of(replay: dict) -> dict[int, list[int]]:
+    """{player_index: 60-card deck} for a replay, skipping malformed entries.
+
+    On the very first call an agent gets ``select is None`` and must answer with
+    its deck instead of option indices, so the deck lands in the action slot of
+    the *next* step -- the same +1 lag as every other action (see THE OFF-BY-ONE
+    above). That makes every replay a decklist source as well as a policy
+    source: the top players' exact 60 cards are recoverable without owning a
+    submission.
+    """
+    steps = replay.get("steps") or []
+    if len(steps) < 2:
+        return {}
+    out: dict[int, list[int]] = {}
+    for p, slot in enumerate(steps[1]):
+        action = slot.get("action")
+        if (isinstance(action, list) and len(action) == DECK_SIZE
+                and all(isinstance(c, int) for c in action)):
+            out[p] = action
+    return out
+
+
 def replay_to_records(
     path: str | Path,
     *,
