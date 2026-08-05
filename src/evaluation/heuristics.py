@@ -19,15 +19,7 @@ Rough strength order: lucario > iono > greedy > first > random.
 THE NON-MAIN FALLBACK IS DELEGATION, NOT NEW CODE
 -------------------------------------------------
 The policy network scores SelectContext.MAIN only -- 50.6% of decisions
-(spec §1). Everything else routes to an existing complete agent:
-
-    def agent(obs):
-        sel = obs["select"]
-        if sel is None:                       # initial deck request
-            return read_deck()
-        if sel["context"] == int(SelectContext.MAIN) and len(sel["option"]) <= K_MAX:
-            return [policy.rank(obs).argmax()]
-        return baseline(obs)                  # already legal for all 49 contexts
+(spec §1). Everything else routes to an existing complete agent.
 
 Do NOT write a per-context handler. Both baselines are legal *by
 construction* for any of the 49 contexts, including the 34 that never appear
@@ -54,6 +46,13 @@ WHICH baseline to delegate to is a strength decision, not a legality one:
               to fetch from the deck" is often the highest-leverage decision of
               the turn.
 
+>>> Our first BC policy clones Yushin Ito and plays that team's Alakazam deck
+>>> (data/processed/deck_yushin_ito.csv), NOT lucario's. lucario's card-ID
+>>> specific scoring is therefore mismatched to our board, which is why
+>>> DEFAULT_FALLBACK is `greedy`. This is an empirical question, not a
+>>> settled one -- run both through scripts/run_arena.py and let win rate
+>>> decide.
+
 CONSEQUENCE WORTH INTERNALIZING: with lucario as the fallback and a policy
 trained by behavioral cloning ON lucario, the agent is lucario everywhere
 except MAIN, where it is an imperfect imitation of lucario. That is a strictly
@@ -63,12 +62,101 @@ lucario -- from stronger data (top Kaggle replays) or from self-play RL.
 Worth knowing before writing another heuristic: attacking ends the turn, so an
 attack-first agent swings before it is set up and loses to random ~87% of the
 time. Develop the board first.
-
-The strong sample agents (lucario, iono) are the interesting expert-data
-sources for behavioral cloning; random/greedy are for sanity checks.
-
-TODO: implement
-    get_baseline(name: str) -> Agent    # resolve "random" | "greedy" | "lucario" | ...
-    BASELINES: dict[str, Agent]
-    route(obs, policy, baseline) -> list[int]   # MAIN -> policy, everything else -> baseline
 """
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+from src.env.cabt_wrapper import arena_path
+
+Agent = Callable[[dict], list]
+
+# Deck-agnostic by default; see the note above.
+DEFAULT_FALLBACK = "greedy"
+
+# Submission-folder agents, resolved lazily -- loading one executes its main.py.
+_SUBMISSION_AGENTS = {"lucario": "agents/lucario", "iono": "agents/iono"}
+_cache: dict[str, Agent] = {}
+
+
+def _load_baselines() -> dict[str, Agent]:
+    arena_path()
+    from agents import AGENTS  # noqa: PLC0415 - needs arena on sys.path
+    return dict(AGENTS)
+
+
+def get_baseline(name: str) -> Agent:
+    """Resolve "random" | "first" | "greedy" | "lucario" | "iono" to an agent.
+
+    Submission-folder agents are loaded through the harness's own
+    load_submission so the Kaggle main.py + deck.csv contract is exercised the
+    same way here as on Kaggle.
+    """
+    if name in _cache:
+        return _cache[name]
+
+    builtins = _load_baselines()
+    if name in builtins:
+        _cache[name] = builtins[name]
+        return _cache[name]
+
+    if name in _SUBMISSION_AGENTS:
+        from src.env.cabt_wrapper import load_agent  # noqa: PLC0415
+        agent, _deck = load_agent(str(arena_path() / _SUBMISSION_AGENTS[name]))
+        _cache[name] = agent
+        return agent
+
+    raise KeyError(f"unknown baseline {name!r}; "
+                   f"expected one of {sorted(builtins) + sorted(_SUBMISSION_AGENTS)}")
+
+
+BASELINES = tuple(["random", "first", "greedy"] + sorted(_SUBMISSION_AGENTS))
+
+
+def is_main(select: dict | None, main_context: int) -> bool:
+    return select is not None and select.get("context") == main_context
+
+
+def clamp_selection(indices: list[int], select: dict) -> list[int]:
+    """Force any wishlist into a legal selection.
+
+    The engine forfeits the match on an illegal selection -- not a bad move, a
+    total loss -- so this runs on EVERY return path, including the policy's.
+    Mirrors agents._pick_n: dedupe, cap at maxCount, pad up to minCount from
+    whatever indices remain.
+    """
+    n = len(select["option"])
+    lo, hi = select["minCount"], min(select["maxCount"], n)
+    out = [i for i in dict.fromkeys(indices) if 0 <= i < n][:hi]
+    if len(out) < lo:
+        out += [i for i in range(n) if i not in out][: lo - len(out)]
+    return out
+
+
+def route(obs: dict,
+          policy: Callable[[dict], list[int]] | None,
+          baseline: Agent,
+          main_context: int,
+          k_max: int = 80) -> list[int]:
+    """MAIN -> policy, everything else -> baseline.
+
+    Falls through to the baseline whenever the policy cannot or should not
+    answer: a non-MAIN context, more candidates than the network was built for,
+    or the policy raising. Falling back is always legal; failing is not.
+    """
+    select = obs.get("select")
+    if select is None:
+        # The initial deck request. Callers own the decklist, not this router.
+        raise ValueError("route() received the initial deck request "
+                         "(select is None); the agent must answer it before "
+                         "routing")
+
+    if policy is not None and is_main(select, main_context) \
+            and len(select["option"]) <= k_max:
+        try:
+            return clamp_selection(policy(obs), select)
+        except Exception:                      # noqa: BLE001 - never forfeit
+            pass
+    return clamp_selection(baseline(obs), select)
